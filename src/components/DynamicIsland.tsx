@@ -15,7 +15,8 @@ import {
   Image as ImageIcon,
   Archive,
   X,
-  Ban
+  Ban,
+  Download
 } from 'lucide-react';
 
 interface DynamicIslandProps {
@@ -224,13 +225,28 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
             transition={{ type: 'spring', stiffness: 420, damping: 30 }}
             className="glass-island px-5 py-2.5 rounded-full flex items-center gap-3 border-emerald-500/30 shadow-[0_0_30px_rgba(50,215,75,0.25)]"
           >
-            <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+            <div className="w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
               <Check className="w-3.5 h-3.5 stroke-[3]" />
             </div>
-            <div className="text-xs">
-              <span className="font-semibold text-white/95">Transferred {recentCompleted.fileName}</span>
+            <div className="text-xs truncate max-w-[210px]">
+              <span className="font-semibold text-white/95">
+                {recentCompleted.direction === 'receiving' ? 'Received ' : 'Sent '}
+                {recentCompleted.fileName}
+              </span>
               <span className="text-white/40 ml-1.5">({formatBytes(recentCompleted.fileSize)})</span>
             </div>
+
+            {recentCompleted.blobUrl && (
+              <a
+                href={recentCompleted.blobUrl}
+                download={recentCompleted.fileName}
+                className="px-3 py-1 rounded-full bg-emerald-500/25 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition ml-1 shrink-0 pointer-events-auto"
+                title="Save file to device"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Save</span>
+              </a>
+            )}
           </motion.div>
         ) : (
           /* State 5: Idle Minimal Pill */

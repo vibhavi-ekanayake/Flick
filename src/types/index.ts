@@ -4,6 +4,7 @@ export type OS = 'macos' | 'windows' | 'ios' | 'android' | 'linux' | 'unknown';
 
 export interface Peer {
   id: string;
+  deviceId?: string;
   name: string;
   deviceType: DeviceType;
   os: OS;

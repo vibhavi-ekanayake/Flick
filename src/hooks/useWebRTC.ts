@@ -33,6 +33,7 @@ export function useWebRTC() {
   // Local device profile
   const [myProfile, setMyProfile] = useState<Peer>({
     id: '',
+    deviceId: '',
     name: 'Flick Node',
     deviceType: 'desktop',
     os: 'unknown',
@@ -107,6 +108,22 @@ export function useWebRTC() {
   // ---------------------------------------------------------------------------
   // 2. WebRTC Peer Connection Lifecycle
   // ---------------------------------------------------------------------------
+  // 2. WebRTC Peer Connection Lifecycle
+  // ---------------------------------------------------------------------------
+  const cleanupPeerConnection = useCallback((peerId: string) => {
+    const pc = peerConnections.current.get(peerId);
+    if (pc) {
+      try { pc.close(); } catch (e) {}
+      peerConnections.current.delete(peerId);
+    }
+    const dc = dataChannels.current.get(peerId);
+    if (dc) {
+      try { dc.close(); } catch (e) {}
+      dataChannels.current.delete(peerId);
+    }
+    pendingIceCandidates.current.delete(peerId);
+  }, []);
+
   const getOrCreatePeerConnection = useCallback((remotePeerId: string): RTCPeerConnection => {
     let pc = peerConnections.current.get(remotePeerId);
     if (pc && pc.connectionState !== 'closed' && pc.connectionState !== 'failed') {
@@ -120,7 +137,7 @@ export function useWebRTC() {
       if (event.candidate && socketRef.current) {
         socketRef.current.emit('signal-ice-candidate', {
           to: remotePeerId,
-          candidate: event.candidate,
+          candidate: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
         });
       }
     };
@@ -137,24 +154,128 @@ export function useWebRTC() {
     };
 
     return pc;
-  }, []);
-
-  const cleanupPeerConnection = useCallback((peerId: string) => {
-    const pc = peerConnections.current.get(peerId);
-    if (pc) {
-      pc.close();
-      peerConnections.current.delete(peerId);
-    }
-    const dc = dataChannels.current.get(peerId);
-    if (dc) {
-      dc.close();
-      dataChannels.current.delete(peerId);
-    }
-    pendingIceCandidates.current.delete(peerId);
-  }, []);
+  }, [cleanupPeerConnection]);
 
   // ---------------------------------------------------------------------------
-  // 3. WebRTC Data Channel Event Handlers (Receiver Side)
+  // 3. Unified Receiver Logic (Used for both WebRTC DataChannel & Local Socket Relay)
+  // ---------------------------------------------------------------------------
+  const handleIncomingHeader = useCallback((remotePeerId: string, meta: FileMetadata, senderName?: string) => {
+    incomingBuffers.current.set(meta.fileId, {
+      meta,
+      chunks: [],
+      receivedBytes: 0,
+    });
+
+    speedTrackers.current.set(meta.fileId, {
+      lastBytes: 0,
+      lastTime: performance.now(),
+    });
+
+    const sender = peers.find((p) => p.id === remotePeerId || p.deviceId === remotePeerId);
+
+    updateTransfer(meta.fileId, {
+      id: meta.fileId,
+      fileName: meta.name,
+      fileSize: meta.size,
+      fileType: meta.type,
+      peerId: remotePeerId,
+      peerName: senderName || sender?.name || 'Nearby Device',
+      direction: 'receiving',
+      status: 'transferring',
+      progress: 0,
+      bytesTransferred: 0,
+      speedBytesPerSec: 0,
+      timeRemainingSec: null,
+      startedAt: Date.now(),
+    });
+  }, [peers, updateTransfer]);
+
+  const handleIncomingChunk = useCallback(async (fileId: string, rawChunk: ArrayBuffer | Blob) => {
+    const buffer = incomingBuffers.current.get(fileId);
+    if (!buffer) return;
+
+    let chunk: ArrayBuffer;
+    if (rawChunk instanceof Blob) {
+      chunk = await rawChunk.arrayBuffer();
+    } else {
+      chunk = rawChunk;
+    }
+
+    buffer.chunks.push(chunk);
+    buffer.receivedBytes += chunk.byteLength;
+
+    const progress = Math.min(100, Math.round((buffer.receivedBytes / buffer.meta.size) * 100));
+
+    const now = performance.now();
+    const tracker = speedTrackers.current.get(fileId);
+    let speed = 0;
+    let eta: number | null = null;
+
+    if (tracker) {
+      const timeDiff = (now - tracker.lastTime) / 1000;
+      if (timeDiff >= 0.3) {
+        const bytesDiff = buffer.receivedBytes - tracker.lastBytes;
+        speed = bytesDiff / timeDiff;
+        tracker.lastBytes = buffer.receivedBytes;
+        tracker.lastTime = now;
+
+        const remainingBytes = buffer.meta.size - buffer.receivedBytes;
+        eta = speed > 0 ? remainingBytes / speed : null;
+      }
+    }
+
+    updateTransfer(fileId, {
+      progress,
+      bytesTransferred: buffer.receivedBytes,
+      ...(speed > 0 ? { speedBytesPerSec: speed, timeRemainingSec: eta } : {}),
+    });
+  }, [updateTransfer]);
+
+  const handleIncomingComplete = useCallback((fileId: string) => {
+    const buffer = incomingBuffers.current.get(fileId);
+    if (!buffer) return;
+
+    const blob = new Blob(buffer.chunks, { type: buffer.meta.type || 'application/octet-stream' });
+    const blobUrl = URL.createObjectURL(blob);
+
+    updateTransfer(fileId, {
+      status: 'completed',
+      progress: 100,
+      bytesTransferred: buffer.meta.size,
+      speedBytesPerSec: 0,
+      timeRemainingSec: 0,
+      blobUrl,
+      completedAt: Date.now(),
+    });
+
+    // Auto-trigger browser download
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = buffer.meta.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+    } catch (e) {
+      console.warn('[Flick] Browser auto-download prevented:', e);
+    }
+
+    incomingBuffers.current.delete(fileId);
+    speedTrackers.current.delete(fileId);
+  }, [updateTransfer]);
+
+  const handleIncomingCancel = useCallback((fileId: string) => {
+    incomingBuffers.current.delete(fileId);
+    speedTrackers.current.delete(fileId);
+    updateTransfer(fileId, {
+      status: 'cancelled',
+      error: 'Transfer cancelled by peer',
+      speedBytesPerSec: 0,
+    });
+  }, [updateTransfer]);
+
+  // ---------------------------------------------------------------------------
+  // 4. WebRTC Data Channel Event Handlers (Receiver Side)
   // ---------------------------------------------------------------------------
   const setupDataChannelEvents = useCallback(
     (remotePeerId: string, channel: RTCDataChannel) => {
@@ -163,7 +284,7 @@ export function useWebRTC() {
 
       let currentFileMeta: FileMetadata | null = null;
 
-      channel.onmessage = (event) => {
+      channel.onmessage = async (event) => {
         if (typeof event.data === 'string') {
           try {
             const message = JSON.parse(event.data);
@@ -171,159 +292,34 @@ export function useWebRTC() {
             if (message.type === 'header') {
               const meta: FileMetadata = message.fileMeta;
               currentFileMeta = meta;
-
-              incomingBuffers.current.set(meta.fileId, {
-                meta,
-                chunks: [],
-                receivedBytes: 0,
-              });
-
-              speedTrackers.current.set(meta.fileId, {
-                lastBytes: 0,
-                lastTime: performance.now(),
-              });
-
-              const sender = peers.find((p) => p.id === remotePeerId);
-
-              updateTransfer(meta.fileId, {
-                id: meta.fileId,
-                fileName: meta.name,
-                fileSize: meta.size,
-                fileType: meta.type,
-                peerId: remotePeerId,
-                peerName: sender?.name || 'Remote Peer',
-                direction: 'receiving',
-                status: 'transferring',
-                progress: 0,
-                bytesTransferred: 0,
-                speedBytesPerSec: 0,
-                timeRemainingSec: null,
-                startedAt: Date.now(),
-              });
+              handleIncomingHeader(remotePeerId, meta);
             } else if (message.type === 'complete') {
-              const fileId = message.fileId;
-              const buffer = incomingBuffers.current.get(fileId);
-
-              if (buffer) {
-                const blob = new Blob(buffer.chunks, { type: buffer.meta.type || 'application/octet-stream' });
-                const blobUrl = URL.createObjectURL(blob);
-
-                updateTransfer(fileId, {
-                  status: 'completed',
-                  progress: 100,
-                  bytesTransferred: buffer.meta.size,
-                  speedBytesPerSec: 0,
-                  timeRemainingSec: 0,
-                  blobUrl,
-                  completedAt: Date.now(),
-                });
-
-                const anchor = document.createElement('a');
-                anchor.href = blobUrl;
-                anchor.download = buffer.meta.name;
-                document.body.appendChild(anchor);
-                anchor.click();
-                document.body.removeChild(anchor);
-
-                incomingBuffers.current.delete(fileId);
-                speedTrackers.current.delete(fileId);
-              }
+              handleIncomingComplete(message.fileId);
             } else if (message.type === 'cancel') {
-              const fileId = message.fileId;
-              updateTransfer(fileId, {
-                status: 'cancelled',
-                error: 'Transfer cancelled by sender',
-                speedBytesPerSec: 0,
-              });
-              incomingBuffers.current.delete(fileId);
-              speedTrackers.current.delete(fileId);
+              handleIncomingCancel(message.fileId);
             }
           } catch (err) {
             console.error('Failed to parse DataChannel message:', err);
           }
-        } else if (event.data instanceof ArrayBuffer && currentFileMeta) {
-          const chunk = event.data;
-          const fileId = currentFileMeta.fileId;
-          const buffer = incomingBuffers.current.get(fileId);
-
-          if (buffer) {
-            buffer.chunks.push(chunk);
-            buffer.receivedBytes += chunk.byteLength;
-
-            const progress = Math.min(100, Math.round((buffer.receivedBytes / buffer.meta.size) * 100));
-
-            const now = performance.now();
-            const tracker = speedTrackers.current.get(fileId);
-            let speed = 0;
-            let eta: number | null = null;
-
-            if (tracker) {
-              const timeDiff = (now - tracker.lastTime) / 1000;
-              if (timeDiff >= 0.3) {
-                const bytesDiff = buffer.receivedBytes - tracker.lastBytes;
-                speed = bytesDiff / timeDiff;
-                tracker.lastBytes = buffer.receivedBytes;
-                tracker.lastTime = now;
-
-                const remainingBytes = buffer.meta.size - buffer.receivedBytes;
-                eta = speed > 0 ? remainingBytes / speed : null;
-              }
-            }
-
-            updateTransfer(fileId, {
-              progress,
-              bytesTransferred: buffer.receivedBytes,
-              ...(speed > 0 ? { speedBytesPerSec: speed, timeRemainingSec: eta } : {}),
-            });
+        } else if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
+          if (currentFileMeta) {
+            await handleIncomingChunk(currentFileMeta.fileId, event.data);
           }
         }
       };
     },
-    [peers, updateTransfer]
+    [handleIncomingHeader, handleIncomingChunk, handleIncomingComplete, handleIncomingCancel]
   );
 
   // ---------------------------------------------------------------------------
-  // 4. File Chunking & Transmission (Sender Side with Cancellation Check)
+  // 5. Dual-Engine File Transmission (WebRTC with Guaranteed Local Socket.io Relay Fallback)
   // ---------------------------------------------------------------------------
   const sendFileToPeer = useCallback(
     async (file: File, targetPeerId: string, existingFileId?: string) => {
-      const pc = getOrCreatePeerConnection(targetPeerId);
       const fileId = existingFileId || `file-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const targetPeer = peers.find((p) => p.id === targetPeerId);
 
       // Check if cancelled before starting
-      if (cancelledTransfers.current.has(fileId)) {
-        cancelledTransfers.current.delete(fileId);
-        return;
-      }
-
-      // Create or reuse data channel
-      let channel = dataChannels.current.get(targetPeerId);
-      if (!channel || channel.readyState !== 'open') {
-        channel = pc.createDataChannel('antigravity-transfer', { ordered: true });
-        setupDataChannelEvents(targetPeerId, channel);
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        socketRef.current?.emit('signal-offer', {
-          to: targetPeerId,
-          offer,
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error('Connection timed out')), 15000);
-          channel!.onopen = () => {
-            clearTimeout(timeout);
-            resolve();
-          };
-          channel!.onerror = (e) => {
-            clearTimeout(timeout);
-            reject(e);
-          };
-        });
-      }
-
       if (cancelledTransfers.current.has(fileId)) {
         cancelledTransfers.current.delete(fileId);
         return;
@@ -345,7 +341,7 @@ export function useWebRTC() {
         fileSize: file.size,
         fileType: file.type,
         peerId: targetPeerId,
-        peerName: targetPeer?.name || 'Remote Peer',
+        peerName: targetPeer?.name || 'Nearby Device',
         direction: 'sending',
         status: 'transferring',
         progress: 0,
@@ -355,47 +351,78 @@ export function useWebRTC() {
         startedAt: Date.now(),
       });
 
-      // Send Header
-      const headerPayload: WebRTCMessageHeader = { type: 'header', fileMeta };
-      channel.send(JSON.stringify(headerPayload));
+      // Step A: Attempt direct WebRTC DataChannel connection with rapid 2.5s fallback
+      let channel = dataChannels.current.get(targetPeerId);
+      let useWebRTC = false;
 
-      channel.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
+      if (channel && channel.readyState === 'open') {
+        useWebRTC = true;
+      } else {
+        try {
+          const pc = getOrCreatePeerConnection(targetPeerId);
+          const dc = pc.createDataChannel('flick-transfer', { ordered: true });
+          setupDataChannelEvents(targetPeerId, dc);
+
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          socketRef.current?.emit('signal-offer', {
+            to: targetPeerId,
+            offer,
+          });
+
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('WebRTC negotiation timeout')), 2500);
+            dc.onopen = () => {
+              clearTimeout(timeout);
+              resolve();
+            };
+            dc.onerror = (e) => {
+              clearTimeout(timeout);
+              reject(e);
+            };
+          });
+
+          if (dc.readyState === 'open') {
+            channel = dc;
+            useWebRTC = true;
+          }
+        } catch (err) {
+          console.log('[Flick Transfer Engine] WebRTC direct P2P unavailable (NAT/AP isolation), using local Wi-Fi relay:', err);
+          useWebRTC = false;
+        }
+      }
+
+      if (cancelledTransfers.current.has(fileId)) {
+        cancelledTransfers.current.delete(fileId);
+        return;
+      }
+
+      // Step B: Send Header
+      if (useWebRTC && channel && channel.readyState === 'open') {
+        const headerPayload: WebRTCMessageHeader = { type: 'header', fileMeta };
+        channel.send(JSON.stringify(headerPayload));
+        channel.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
+      } else {
+        socketRef.current?.emit('relay-start', {
+          to: targetPeerId,
+          fileMeta,
+        });
+      }
 
       let offset = 0;
       let sentBytes = 0;
       let lastSpeedCalcTime = performance.now();
       let lastSentBytes = 0;
 
+      // Step C: Stream File Chunks
       while (offset < file.size) {
-        // Immediate cancellation check
         if (cancelledTransfers.current.has(fileId)) {
-          try {
-            channel.send(JSON.stringify({ type: 'cancel', fileId }));
-          } catch (e) {}
-          updateTransfer(fileId, {
-            status: 'cancelled',
-            error: 'Cancelled by user',
-            speedBytesPerSec: 0,
-          });
-          cancelledTransfers.current.delete(fileId);
-          return;
-        }
-
-        // Backpressure flow control
-        if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
-          await new Promise<void>((resolve) => {
-            const onLow = () => {
-              channel!.removeEventListener('bufferedamountlow', onLow);
-              resolve();
-            };
-            channel!.addEventListener('bufferedamountlow', onLow);
-          });
-        }
-
-        if (cancelledTransfers.current.has(fileId)) {
-          try {
-            channel.send(JSON.stringify({ type: 'cancel', fileId }));
-          } catch (e) {}
+          if (useWebRTC && channel && channel.readyState === 'open') {
+            try { channel.send(JSON.stringify({ type: 'cancel', fileId })); } catch (e) {}
+          } else {
+            socketRef.current?.emit('relay-cancel', { to: targetPeerId, fileId });
+          }
           updateTransfer(fileId, {
             status: 'cancelled',
             error: 'Cancelled by user',
@@ -408,13 +435,35 @@ export function useWebRTC() {
         const slice = file.slice(offset, offset + CHUNK_SIZE);
         const arrayBuffer = await slice.arrayBuffer();
 
-        channel.send(arrayBuffer);
+        if (useWebRTC && channel && channel.readyState === 'open') {
+          // Flow control backpressure for WebRTC DataChannel
+          if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+            await new Promise<void>((resolve) => {
+              const onLow = () => {
+                channel!.removeEventListener('bufferedamountlow', onLow);
+                resolve();
+              };
+              channel!.addEventListener('bufferedamountlow', onLow);
+            });
+          }
+          channel.send(arrayBuffer);
+        } else {
+          // Local Socket.io Wi-Fi stream
+          socketRef.current?.emit('relay-chunk', {
+            to: targetPeerId,
+            fileId,
+            chunk: arrayBuffer,
+            index: Math.floor(offset / CHUNK_SIZE),
+            totalChunks,
+          });
+          // Micro yield to let socket flush smoothly
+          await new Promise((r) => setTimeout(r, 4));
+        }
 
         offset += slice.size;
         sentBytes += slice.size;
 
         const progress = Math.min(100, Math.round((sentBytes / file.size) * 100));
-
         const now = performance.now();
         const timeDiff = (now - lastSpeedCalcTime) / 1000;
         let speed = 0;
@@ -437,16 +486,22 @@ export function useWebRTC() {
       }
 
       if (cancelledTransfers.current.has(fileId)) {
-        try {
-          channel.send(JSON.stringify({ type: 'cancel', fileId }));
-        } catch (e) {}
+        if (useWebRTC && channel && channel.readyState === 'open') {
+          try { channel.send(JSON.stringify({ type: 'cancel', fileId })); } catch (e) {}
+        } else {
+          socketRef.current?.emit('relay-cancel', { to: targetPeerId, fileId });
+        }
         cancelledTransfers.current.delete(fileId);
         return;
       }
 
-      // Send complete
-      const completePayload: WebRTCMessageComplete = { type: 'complete', fileId };
-      channel.send(JSON.stringify(completePayload));
+      // Step D: Send Complete
+      if (useWebRTC && channel && channel.readyState === 'open') {
+        const completePayload: WebRTCMessageComplete = { type: 'complete', fileId };
+        channel.send(JSON.stringify(completePayload));
+      } else {
+        socketRef.current?.emit('relay-complete', { to: targetPeerId, fileId });
+      }
 
       updateTransfer(fileId, {
         status: 'completed',
@@ -621,6 +676,7 @@ export function useWebRTC() {
     const detected = detectDevice();
     const initialProfile: Peer = {
       id: '',
+      deviceId: detected.deviceId,
       name: detected.defaultName,
       deviceType: detected.deviceType,
       os: detected.os,
@@ -638,91 +694,133 @@ export function useWebRTC() {
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      const updatedProfile = { ...initialProfile, id: socket.id || '' };
+      const updatedProfile: Peer = { ...initialProfile, id: socket.id || '' };
       setMyProfile(updatedProfile);
       socket.emit('join', updatedProfile);
     });
 
+    // Multi-tab filter: NEVER display other tabs from the same physical device on the radar
     socket.on('peers-list', (peerList: Peer[]) => {
-      setPeers(peerList);
+      setPeers(peerList.filter((p) => p.deviceId !== detected.deviceId));
     });
 
     socket.on('peer-joined', (newPeer: Peer) => {
+      if (newPeer.deviceId === detected.deviceId) return;
       setPeers((prev) => {
-        if (prev.some((p) => p.id === newPeer.id)) return prev;
+        if (prev.some((p) => p.id === newPeer.id || (newPeer.deviceId && p.deviceId === newPeer.deviceId))) {
+          return prev.map((p) => (p.deviceId === newPeer.deviceId ? newPeer : p));
+        }
         return [...prev, newPeer];
       });
     });
 
     socket.on('peer-updated', (updatedPeer: Peer) => {
-      setPeers((prev) => prev.map((p) => (p.id === updatedPeer.id ? updatedPeer : p)));
+      if (updatedPeer.deviceId === detected.deviceId) return;
+      setPeers((prev) => prev.map((p) => (p.id === updatedPeer.id || p.deviceId === updatedPeer.deviceId ? updatedPeer : p)));
     });
 
-    socket.on('peer-left', ({ id }: { id: string }) => {
-      setPeers((prev) => prev.filter((p) => p.id !== id));
+    socket.on('peer-left', ({ id, deviceId }: { id: string; deviceId?: string }) => {
+      setPeers((prev) => prev.filter((p) => p.id !== id && (!deviceId || p.deviceId !== deviceId)));
       cleanupPeerConnection(id);
     });
 
+    // WebRTC Signaling
     socket.on('signal-offer', async ({ from, offer }) => {
-      const pc = getOrCreatePeerConnection(from);
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-
-      const queuedCandidates = pendingIceCandidates.current.get(from) || [];
-      for (const candidate of queuedCandidates) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      }
-      pendingIceCandidates.current.delete(from);
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      socket.emit('signal-answer', {
-        to: from,
-        answer,
-      });
-    });
-
-    socket.on('signal-answer', async ({ from, answer }) => {
-      const pc = peerConnections.current.get(from);
-      if (pc) {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      try {
+        const pc = getOrCreatePeerConnection(from);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
         const queuedCandidates = pendingIceCandidates.current.get(from) || [];
         for (const candidate of queuedCandidates) {
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          try {
+            await pc.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
+          } catch (e) {}
         }
         pendingIceCandidates.current.delete(from);
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        socket.emit('signal-answer', {
+          to: from,
+          answer,
+        });
+      } catch (err) {
+        console.warn('Error handling WebRTC offer:', err);
+      }
+    });
+
+    socket.on('signal-answer', async ({ from, answer }) => {
+      try {
+        const pc = peerConnections.current.get(from);
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+          const queuedCandidates = pendingIceCandidates.current.get(from) || [];
+          for (const candidate of queuedCandidates) {
+            try {
+              await pc.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
+            } catch (e) {}
+          }
+          pendingIceCandidates.current.delete(from);
+        }
+      } catch (err) {
+        console.warn('Error handling WebRTC answer:', err);
       }
     });
 
     socket.on('signal-ice-candidate', async ({ from, candidate }) => {
-      const pc = peerConnections.current.get(from);
-      if (pc && pc.remoteDescription && pc.remoteDescription.type) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } else {
-        const existing = pendingIceCandidates.current.get(from) || [];
-        existing.push(candidate);
-        pendingIceCandidates.current.set(from, existing);
+      try {
+        const pc = peerConnections.current.get(from);
+        if (pc && pc.remoteDescription && pc.remoteDescription.type && candidate) {
+          await pc.addIceCandidate(candidate).catch((e) => console.warn('ICE add error:', e));
+        } else if (candidate) {
+          const existing = pendingIceCandidates.current.get(from) || [];
+          existing.push(candidate);
+          pendingIceCandidates.current.set(from, existing);
+        }
+      } catch (err) {
+        console.warn('Error handling ICE candidate:', err);
       }
     });
 
+    // Local Socket.io Wi-Fi Relay Handlers (Guaranteed 100% Reliable Receiving)
+    socket.on('relay-start', ({ from, senderPeer, fileMeta }) => {
+      handleIncomingHeader(from, fileMeta, senderPeer?.name);
+    });
+
+    socket.on('relay-chunk', async ({ fileId, chunk }) => {
+      await handleIncomingChunk(fileId, chunk);
+    });
+
+    socket.on('relay-complete', ({ fileId }) => {
+      handleIncomingComplete(fileId);
+    });
+
+    socket.on('relay-cancel', ({ fileId }) => {
+      handleIncomingCancel(fileId);
+    });
+
     socket.on('transfer-cancel', ({ fileId }: { fileId: string }) => {
-      incomingBuffers.current.delete(fileId);
-      speedTrackers.current.delete(fileId);
-      updateTransfer(fileId, {
-        status: 'cancelled',
-        error: 'Transfer cancelled by peer',
-        speedBytesPerSec: 0,
-      });
+      handleIncomingCancel(fileId);
     });
 
     return () => {
       socket.disconnect();
-      peerConnections.current.forEach((pc) => pc.close());
+      peerConnections.current.forEach((pc) => {
+        try { pc.close(); } catch (e) {}
+      });
       peerConnections.current.clear();
       dataChannels.current.clear();
     };
-  }, [cleanupPeerConnection, getOrCreatePeerConnection, updateTransfer]);
+  }, [
+    cleanupPeerConnection,
+    getOrCreatePeerConnection,
+    handleIncomingHeader,
+    handleIncomingChunk,
+    handleIncomingComplete,
+    handleIncomingCancel,
+  ]);
 
   // Derived states
   const activeTransfer = Object.values(transfers).find(

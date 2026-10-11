@@ -15,9 +15,26 @@ const COLORS = [
   '#FFD60A', // Apple Yellow
 ];
 
-export function detectDevice(): { deviceType: DeviceType; os: OS; defaultName: string; color: string } {
+export function getDeviceId(): string {
+  if (typeof window === 'undefined') {
+    return 'dev_ssr';
+  }
+  try {
+    let id = localStorage.getItem('flick_device_id');
+    if (!id) {
+      id = 'dev_' + Math.random().toString(36).substring(2, 10) + Date.now().toString(36);
+      localStorage.setItem('flick_device_id', id);
+    }
+    return id;
+  } catch (e) {
+    return 'dev_temp_' + Math.random().toString(36).substring(2, 10);
+  }
+}
+
+export function detectDevice(): { deviceId: string; deviceType: DeviceType; os: OS; defaultName: string; color: string } {
   if (typeof window === 'undefined') {
     return {
+      deviceId: 'dev_ssr',
       deviceType: 'desktop',
       os: 'unknown',
       defaultName: 'Flick Node',
@@ -65,8 +82,10 @@ export function detectDevice(): { deviceType: DeviceType; os: OS; defaultName: s
   else if (os === 'linux') deviceLabel = 'Linux';
 
   const defaultName = savedName || `${randomAdj} ${deviceLabel}`;
+  const deviceId = getDeviceId();
 
   return {
+    deviceId,
     deviceType,
     os,
     defaultName,
