@@ -89,30 +89,19 @@ app.prepare().then(() => {
       ip = ip.substring(7);
     }
 
-    // Localhost / loopback on host machine maps to primary LAN subnet room so PC & phone discover each other
-    if (ip === '::1' || ip === '127.0.0.1' || ip === 'localhost') {
-      return primaryHostLanPrefix ? `wifi_${primaryHostLanPrefix}` : 'wifi_local';
+    // Local / private network connections:
+    // When running locally on LAN, loopback (127.0.0.1) and private LAN IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    // belong to the local home/office Wi-Fi.
+    const isLoopback = ip === '::1' || ip === '127.0.0.1' || ip === 'localhost';
+    const isPrivateLan = ip.startsWith('192.168.') || ip.startsWith('10.') || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip);
+
+    if (isLoopback || isPrivateLan) {
+      return 'wifi_local';
     }
 
-    const parts = ip.split('.');
-    if (parts.length === 4) {
-      // 192.168.x.yyy -> group by 192.168.x subnet
-      if (parts[0] === '192' && parts[1] === '168') {
-        return `wifi_192.168.${parts[2]}`;
-      }
-      // 10.x.y.zzz -> group by 10.x.y subnet
-      if (parts[0] === '10') {
-        return `wifi_10.${parts[1]}.${parts[2]}`;
-      }
-      // 172.16-31.x.y
-      if (parts[0] === '172' && parseInt(parts[1], 10) >= 16 && parseInt(parts[1], 10) <= 31) {
-        return `wifi_172.${parts[1]}.${parts[2]}`;
-      }
-      // Public IP (for cloud deployments where all devices on same Wi-Fi share public IP)
-      return `wifi_pub_${ip}`;
-    }
-
-    return `wifi_${ip || 'unknown'}`;
+    // For public / cloud deployments (e.g. Vercel / VPS):
+    // All devices on the same Wi-Fi router share the exact same external public IP
+    return `wifi_pub_${ip || 'unknown'}`;
   }
 
   // Socket tracking

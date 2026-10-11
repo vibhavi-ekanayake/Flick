@@ -292,23 +292,23 @@ export function useWebRTC() {
             if (message.type === 'header') {
               const meta: FileMetadata = message.fileMeta;
               currentFileMeta = meta;
-              handleIncomingHeader(remotePeerId, meta);
+              handleIncomingHeaderRef.current(remotePeerId, meta);
             } else if (message.type === 'complete') {
-              handleIncomingComplete(message.fileId);
+              handleIncomingCompleteRef.current(message.fileId);
             } else if (message.type === 'cancel') {
-              handleIncomingCancel(message.fileId);
+              handleIncomingCancelRef.current(message.fileId);
             }
           } catch (err) {
             console.error('Failed to parse DataChannel message:', err);
           }
         } else if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
           if (currentFileMeta) {
-            await handleIncomingChunk(currentFileMeta.fileId, event.data);
+            await handleIncomingChunkRef.current(currentFileMeta.fileId, event.data);
           }
         }
       };
     },
-    [handleIncomingHeader, handleIncomingChunk, handleIncomingComplete, handleIncomingCancel]
+    []
   );
 
   // ---------------------------------------------------------------------------
@@ -669,8 +669,27 @@ export function useWebRTC() {
   }, []);
 
 
+  // Handler references to keep socket lifecycle strictly mounted once
+  const handleIncomingHeaderRef = useRef(handleIncomingHeader);
+  handleIncomingHeaderRef.current = handleIncomingHeader;
+
+  const handleIncomingChunkRef = useRef(handleIncomingChunk);
+  handleIncomingChunkRef.current = handleIncomingChunk;
+
+  const handleIncomingCompleteRef = useRef(handleIncomingComplete);
+  handleIncomingCompleteRef.current = handleIncomingComplete;
+
+  const handleIncomingCancelRef = useRef(handleIncomingCancel);
+  handleIncomingCancelRef.current = handleIncomingCancel;
+
+  const getOrCreatePeerConnectionRef = useRef(getOrCreatePeerConnection);
+  getOrCreatePeerConnectionRef.current = getOrCreatePeerConnection;
+
+  const cleanupPeerConnectionRef = useRef(cleanupPeerConnection);
+  cleanupPeerConnectionRef.current = cleanupPeerConnection;
+
   // ---------------------------------------------------------------------------
-  // 9. Socket.io Connection & Signaling Initialization
+  // 9. Socket.io Connection & Signaling Initialization (Mounts ONCE)
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const detected = detectDevice();
@@ -721,13 +740,13 @@ export function useWebRTC() {
 
     socket.on('peer-left', ({ id, deviceId }: { id: string; deviceId?: string }) => {
       setPeers((prev) => prev.filter((p) => p.id !== id && (!deviceId || p.deviceId !== deviceId)));
-      cleanupPeerConnection(id);
+      cleanupPeerConnectionRef.current(id);
     });
 
     // WebRTC Signaling
     socket.on('signal-offer', async ({ from, offer }) => {
       try {
-        const pc = getOrCreatePeerConnection(from);
+        const pc = getOrCreatePeerConnectionRef.current(from);
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
         const queuedCandidates = pendingIceCandidates.current.get(from) || [];
@@ -786,23 +805,23 @@ export function useWebRTC() {
 
     // Local Socket.io Wi-Fi Relay Handlers (Guaranteed 100% Reliable Receiving)
     socket.on('relay-start', ({ from, senderPeer, fileMeta }) => {
-      handleIncomingHeader(from, fileMeta, senderPeer?.name);
+      handleIncomingHeaderRef.current(from, fileMeta, senderPeer?.name);
     });
 
     socket.on('relay-chunk', async ({ fileId, chunk }) => {
-      await handleIncomingChunk(fileId, chunk);
+      await handleIncomingChunkRef.current(fileId, chunk);
     });
 
     socket.on('relay-complete', ({ fileId }) => {
-      handleIncomingComplete(fileId);
+      handleIncomingCompleteRef.current(fileId);
     });
 
     socket.on('relay-cancel', ({ fileId }) => {
-      handleIncomingCancel(fileId);
+      handleIncomingCancelRef.current(fileId);
     });
 
     socket.on('transfer-cancel', ({ fileId }: { fileId: string }) => {
-      handleIncomingCancel(fileId);
+      handleIncomingCancelRef.current(fileId);
     });
 
     return () => {
@@ -813,14 +832,7 @@ export function useWebRTC() {
       peerConnections.current.clear();
       dataChannels.current.clear();
     };
-  }, [
-    cleanupPeerConnection,
-    getOrCreatePeerConnection,
-    handleIncomingHeader,
-    handleIncomingChunk,
-    handleIncomingComplete,
-    handleIncomingCancel,
-  ]);
+  }, []);
 
   // Derived states
   const activeTransfer = Object.values(transfers).find(
