@@ -13,8 +13,17 @@ const port = parseInt(process.env.PORT || '3001', 10);
 const httpServer = createServer((req, res) => {
   // Health check endpoint
   if (req.url === '/health' || req.url === '/') {
+    const forwarded = req.headers['cf-connecting-ip'] || req.headers['x-real-ip'] || req.headers['x-forwarded-for'];
+    const clientIp = (forwarded ? forwarded.split(',')[0].trim() : req.socket.remoteAddress) || 'unknown';
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', name: 'Flick Signaling Server', peers: peers.size }));
+    res.end(JSON.stringify({
+      status: 'ok',
+      name: 'Flick Signaling Server',
+      yourIp: clientIp,
+      yourRoom: `wifi_${clientIp}`,
+      activeRooms: rooms.size,
+      connectedSockets: socketsInfo.size,
+    }));
     return;
   }
   res.writeHead(404);
@@ -32,25 +41,32 @@ const io = new Server(httpServer, {
 
 // Helper to determine the network room key for a given client socket
 function getClientNetworkRoom(socket) {
-  const forwarded = socket.handshake.headers['x-forwarded-for'];
-  let ip = (forwarded ? forwarded.split(',')[0].trim() : socket.handshake.address) || '';
+  // Priority: Cloudflare -> x-real-ip -> x-forwarded-for -> socket address
+  const forwarded =
+    socket.handshake.headers['cf-connecting-ip'] ||
+    socket.handshake.headers['x-real-ip'] ||
+    socket.handshake.headers['x-forwarded-for'];
+
+  let ip = '';
+  if (forwarded) {
+    ip = forwarded.split(',')[0].trim();
+  } else {
+    ip = socket.handshake.address || '';
+  }
 
   if (ip.startsWith('::ffff:')) {
     ip = ip.substring(7);
   }
 
-  // Local / private network connections
-  const isLoopback = ip === '::1' || ip === '127.0.0.1' || ip === 'localhost';
-  const isPrivateLan = ip.startsWith('192.168.') || ip.startsWith('10.') || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip);
-
-  if (isLoopback || isPrivateLan) {
-    return 'wifi_local';
+  // When deployed to Render in the cloud:
+  // All devices connected to the SAME Wi-Fi router share the exact same Public IP.
+  // A phone on Mobile Data (Cellular 4G/5G) has a completely DIFFERENT carrier IP.
+  // Isolating by this IP guarantees Mobile Data and Wi-Fi NEVER see each other!
+  if (ip && ip !== '::1' && ip !== '127.0.0.1' && ip !== 'localhost') {
+    return `wifi_${ip}`;
   }
 
-  // On Render / cloud deployments:
-  // All devices on the same Wi-Fi router share the exact same external public IP.
-  // Grouping by this IP ensures only devices on the same Wi-Fi discover each other!
-  return `wifi_pub_${ip || 'unknown'}`;
+  return 'wifi_local';
 }
 
 // Sockets and Rooms tracking
