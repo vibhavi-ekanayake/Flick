@@ -30,44 +30,119 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 1e8,
 });
 
-const peers = new Map();
+// Helper to determine the network room key for a given client socket
+function getClientNetworkRoom(socket) {
+  const forwarded = socket.handshake.headers['x-forwarded-for'];
+  let ip = (forwarded ? forwarded.split(',')[0].trim() : socket.handshake.address) || '';
+
+  if (ip.startsWith('::ffff:')) {
+    ip = ip.substring(7);
+  }
+
+  // Local / private network connections
+  const isLoopback = ip === '::1' || ip === '127.0.0.1' || ip === 'localhost';
+  const isPrivateLan = ip.startsWith('192.168.') || ip.startsWith('10.') || /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip);
+
+  if (isLoopback || isPrivateLan) {
+    return 'wifi_local';
+  }
+
+  // On Render / cloud deployments:
+  // All devices on the same Wi-Fi router share the exact same external public IP.
+  // Grouping by this IP ensures only devices on the same Wi-Fi discover each other!
+  return `wifi_pub_${ip || 'unknown'}`;
+}
+
+// Sockets and Rooms tracking
+// socketsInfo: Map<socketId, { socket, room, deviceId, peerData }>
+const socketsInfo = new Map();
+
+// rooms: Map<roomName, Map<deviceId, { primarySocketId: string, sockets: Set<string>, peerData: object }>>
+const rooms = new Map();
 
 io.on('connection', (socket) => {
-  const clientIp = socket.handshake.address;
-
   // 1. Peer announcement
   socket.on('join', (peerProfile) => {
+    const room = getClientNetworkRoom(socket);
+    socket.join(room);
+
+    const deviceId = peerProfile.deviceId || `dev_${socket.id}`;
     const peerData = {
       id: socket.id,
+      deviceId: deviceId,
       name: peerProfile.name || `Device-${socket.id.slice(0, 4)}`,
       deviceType: peerProfile.deviceType || 'desktop',
       os: peerProfile.os || 'unknown',
       color: peerProfile.color || '#0A84FF',
-      ip: clientIp,
       joinedAt: Date.now(),
     };
 
-    peers.set(socket.id, peerData);
+    socketsInfo.set(socket.id, {
+      socket,
+      room,
+      deviceId,
+      peerData,
+    });
     socket.data.peer = peerData;
+    socket.data.room = room;
+    socket.data.deviceId = deviceId;
 
-    socket.emit('peers-list', Array.from(peers.values()).filter((p) => p.id !== socket.id));
-    socket.broadcast.emit('peer-joined', peerData);
+    if (!rooms.has(room)) {
+      rooms.set(room, new Map());
+    }
+    const roomDevices = rooms.get(room);
 
-    console.log(`[+] Peer Connected: ${peerData.name} (${socket.id})`);
+    const isExistingDevice = roomDevices.has(deviceId);
+    let deviceEntry;
+
+    if (isExistingDevice) {
+      deviceEntry = roomDevices.get(deviceId);
+      deviceEntry.sockets.add(socket.id);
+      deviceEntry.primarySocketId = socket.id;
+      deviceEntry.peerData = { ...deviceEntry.peerData, ...peerData, id: socket.id };
+    } else {
+      deviceEntry = {
+        primarySocketId: socket.id,
+        sockets: new Set([socket.id]),
+        peerData,
+      };
+      roomDevices.set(deviceId, deviceEntry);
+    }
+
+    // Send the list of OTHER devices in this Wi-Fi room (excluding this device's own tabs)
+    const otherPeersInRoom = Array.from(roomDevices.values())
+      .filter((d) => d.peerData.deviceId !== deviceId)
+      .map((d) => ({ ...d.peerData, id: d.primarySocketId }));
+
+    socket.emit('peers-list', otherPeersInRoom);
+
+    // Only broadcast 'peer-joined' to OTHER devices in the room if this is a newly arrived device
+    // (Opening extra tabs on the same device will NOT spam or duplicate device nodes)
+    if (!isExistingDevice) {
+      socket.to(room).emit('peer-joined', peerData);
+      console.log(`[+] Device Joined [${room}]: ${peerData.name} (${deviceId}) [${peerData.deviceType} / ${peerData.os}]`);
+    } else {
+      console.log(`[~] Additional Tab Connected for Device: ${peerData.name} (${deviceId}) [${socket.id}]`);
+    }
   });
 
   // 2. Profile update
   socket.on('update-profile', (updates) => {
-    if (peers.has(socket.id)) {
-      const existing = peers.get(socket.id);
-      const updated = { ...existing, ...updates, id: socket.id };
-      peers.set(socket.id, updated);
-      socket.data.peer = updated;
-      socket.broadcast.emit('peer-updated', updated);
+    const info = socketsInfo.get(socket.id);
+    if (info) {
+      info.peerData = { ...info.peerData, ...updates };
+      socket.data.peer = info.peerData;
+
+      const roomDevices = rooms.get(info.room);
+      if (roomDevices && roomDevices.has(info.deviceId)) {
+        const deviceEntry = roomDevices.get(info.deviceId);
+        deviceEntry.peerData = { ...deviceEntry.peerData, ...updates };
+        socket.to(info.room).emit('peer-updated', deviceEntry.peerData);
+      }
     }
   });
 
-  // 3. WebRTC Offer
+  // 3. WebRTC Signaling: Offer
   socket.on('signal-offer', ({ to, offer, meta }) => {
     io.to(to).emit('signal-offer', {
       from: socket.id,
@@ -77,7 +152,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // 4. WebRTC Answer
+  // 4. WebRTC Signaling: Answer
   socket.on('signal-answer', ({ to, answer }) => {
     io.to(to).emit('signal-answer', {
       from: socket.id,
@@ -85,7 +160,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // 5. ICE Candidate
+  // 5. WebRTC Signaling: ICE Candidate
   socket.on('signal-ice-candidate', ({ to, candidate }) => {
     io.to(to).emit('signal-ice-candidate', {
       from: socket.id,
@@ -93,30 +168,67 @@ io.on('connection', (socket) => {
     });
   });
 
-  // 6. Transfer Request / Response
-  socket.on('transfer-request', ({ to, fileMeta }) => {
-    io.to(to).emit('transfer-request', {
+  // 6. Local Socket Relay Fallback (Guaranteed 100% reliable transfer over local Wi-Fi)
+  socket.on('relay-start', ({ to, fileMeta }) => {
+    io.to(to).emit('relay-start', {
       from: socket.id,
       senderPeer: socket.data.peer,
       fileMeta,
     });
   });
 
-  socket.on('transfer-response', ({ to, accepted, fileId }) => {
-    io.to(to).emit('transfer-response', {
+  socket.on('relay-chunk', ({ to, fileId, chunk, index, totalChunks }) => {
+    io.to(to).emit('relay-chunk', {
       from: socket.id,
-      accepted,
+      fileId,
+      chunk,
+      index,
+      totalChunks,
+    });
+  });
+
+  socket.on('relay-complete', ({ to, fileId }) => {
+    io.to(to).emit('relay-complete', {
+      from: socket.id,
       fileId,
     });
   });
 
-  // 7. Disconnect
+  socket.on('relay-cancel', ({ to, fileId }) => {
+    io.to(to).emit('relay-cancel', {
+      from: socket.id,
+      fileId,
+    });
+  });
+
+  // 7. Transfer cancellation signal
+  socket.on('transfer-cancel', ({ to, fileId }) => {
+    io.to(to).emit('transfer-cancel', {
+      from: socket.id,
+      fileId,
+    });
+  });
+
+  // 8. Disconnect
   socket.on('disconnect', () => {
-    if (peers.has(socket.id)) {
-      const peer = peers.get(socket.id);
-      peers.delete(socket.id);
-      socket.broadcast.emit('peer-left', { id: socket.id });
-      console.log(`[-] Peer Disconnected: ${peer.name} (${socket.id})`);
+    const info = socketsInfo.get(socket.id);
+    if (info) {
+      socketsInfo.delete(socket.id);
+      const roomDevices = rooms.get(info.room);
+      if (roomDevices && roomDevices.has(info.deviceId)) {
+        const deviceEntry = roomDevices.get(info.deviceId);
+        deviceEntry.sockets.delete(socket.id);
+
+        if (deviceEntry.sockets.size === 0) {
+          roomDevices.delete(info.deviceId);
+          socket.to(info.room).emit('peer-left', { id: socket.id, deviceId: info.deviceId });
+          console.log(`[-] Device Left [${info.room}]: ${info.peerData.name} (${info.deviceId})`);
+        } else {
+          deviceEntry.primarySocketId = Array.from(deviceEntry.sockets)[0];
+          deviceEntry.peerData.id = deviceEntry.primarySocketId;
+          console.log(`[~] Tab Closed for Device: ${info.peerData.name} (${deviceEntry.sockets.size} tab(s) remaining)`);
+        }
+      }
     }
   });
 });
