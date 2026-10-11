@@ -3,7 +3,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FileTransfer } from '../types';
-import { formatBytes, formatSpeed } from '../utils/format';
+import { formatBytes } from '../utils/format';
 import { 
   FolderDown, 
   ArrowUpRight, 
@@ -16,9 +16,13 @@ import {
 
 interface TransferHistoryDrawerProps {
   transfers: Record<string, FileTransfer>;
+  onCancelTransfer?: (transferId: string) => void;
 }
 
-export const TransferHistoryDrawer: React.FC<TransferHistoryDrawerProps> = ({ transfers }) => {
+export const TransferHistoryDrawer: React.FC<TransferHistoryDrawerProps> = ({ 
+  transfers,
+  onCancelTransfer 
+}) => {
   const [isOpen, setIsOpen] = useState(false);
   const transferList = Object.values(transfers).reverse();
 
@@ -103,10 +107,21 @@ export const TransferHistoryDrawer: React.FC<TransferHistoryDrawerProps> = ({ tr
                           <Check className="w-3 h-3" /> Done
                         </span>
                       )}
-                      {t.status === 'transferring' && (
-                        <span className="text-cyan-400 text-[10px] font-semibold font-mono">
-                          {t.progress}%
-                        </span>
+                      {(t.status === 'transferring' || t.status === 'pending') && (
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-cyan-400 text-[10px] font-semibold font-mono">
+                            {t.progress}%
+                          </span>
+                          {onCancelTransfer && (
+                            <button
+                              onClick={() => onCancelTransfer(t.id)}
+                              className="p-1 rounded-md text-rose-400 hover:bg-rose-500/20 transition"
+                              title="Cancel transfer"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
                       )}
                       {t.status === 'cancelled' && (
                         <span className="text-rose-400 text-[10px]">Cancelled</span>

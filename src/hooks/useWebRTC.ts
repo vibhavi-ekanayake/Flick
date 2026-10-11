@@ -6,6 +6,7 @@ import {
   Peer,
   FileTransfer,
   FileMetadata,
+  PendingSend,
   IncomingTransferRequest,
   WebRTCMessageHeader,
   WebRTCMessageComplete,
@@ -45,10 +46,13 @@ export function useWebRTC() {
   // Active / recent file transfers
   const [transfers, setTransfers] = useState<Record<string, FileTransfer>>({});
 
+  // Pre-send undo window to prevent accidental uploads
+  const [pendingSend, setPendingSend] = useState<PendingSend | null>(null);
+
   // Incoming transfer waiting for user acceptance
   const [incomingRequest, setIncomingRequest] = useState<IncomingTransferRequest | null>(null);
 
-  // Auto-accept mode toggle (AirDrop-style for trusted networks)
+  // Auto-accept mode toggle
   const [autoAccept, setAutoAccept] = useState<boolean>(true);
 
   // Socket and WebRTC connection references
@@ -56,6 +60,10 @@ export function useWebRTC() {
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const dataChannels = useRef<Map<string, RTCDataChannel>>(new Map());
   const pendingIceCandidates = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+
+  // Cancellation tracking
+  const cancelledTransfers = useRef<Set<string>>(new Set());
+  const pendingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // In-flight received chunk buffers: Map<fileId, { meta: FileMetadata, chunks: ArrayBuffer[], receivedBytes: number }>
   const incomingBuffers = useRef<Map<string, { meta: FileMetadata; chunks: ArrayBuffer[]; receivedBytes: number }>>(
@@ -108,7 +116,6 @@ export function useWebRTC() {
     pc = new RTCPeerConnection(ICE_SERVERS);
     peerConnections.current.set(remotePeerId, pc);
 
-    // Send local ICE candidates to remote peer via signaling socket
     pc.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
         socketRef.current.emit('signal-ice-candidate', {
@@ -124,7 +131,6 @@ export function useWebRTC() {
       }
     };
 
-    // When remote peer creates a data channel, setup receiver handlers
     pc.ondatachannel = (event) => {
       const dc = event.channel;
       setupDataChannelEvents(remotePeerId, dc);
@@ -158,7 +164,6 @@ export function useWebRTC() {
       let currentFileMeta: FileMetadata | null = null;
 
       channel.onmessage = (event) => {
-        // String message indicates control protocol (Header, Complete, Cancel)
         if (typeof event.data === 'string') {
           try {
             const message = JSON.parse(event.data);
@@ -200,7 +205,6 @@ export function useWebRTC() {
               const buffer = incomingBuffers.current.get(fileId);
 
               if (buffer) {
-                // Reassemble binary chunks into full Blob
                 const blob = new Blob(buffer.chunks, { type: buffer.meta.type || 'application/octet-stream' });
                 const blobUrl = URL.createObjectURL(blob);
 
@@ -214,7 +218,6 @@ export function useWebRTC() {
                   completedAt: Date.now(),
                 });
 
-                // Auto-trigger download for seamless iOS/visionOS experience
                 const anchor = document.createElement('a');
                 anchor.href = blobUrl;
                 anchor.download = buffer.meta.name;
@@ -222,23 +225,23 @@ export function useWebRTC() {
                 anchor.click();
                 document.body.removeChild(anchor);
 
-                // Clean up memory buffer
                 incomingBuffers.current.delete(fileId);
                 speedTrackers.current.delete(fileId);
               }
             } else if (message.type === 'cancel') {
-              updateTransfer(message.fileId, {
+              const fileId = message.fileId;
+              updateTransfer(fileId, {
                 status: 'cancelled',
-                error: 'Transfer cancelled by peer',
+                error: 'Transfer cancelled by sender',
+                speedBytesPerSec: 0,
               });
-              incomingBuffers.current.delete(message.fileId);
-              speedTrackers.current.delete(message.fileId);
+              incomingBuffers.current.delete(fileId);
+              speedTrackers.current.delete(fileId);
             }
           } catch (err) {
             console.error('Failed to parse DataChannel message:', err);
           }
         } else if (event.data instanceof ArrayBuffer && currentFileMeta) {
-          // Binary chunk received
           const chunk = event.data;
           const fileId = currentFileMeta.fileId;
           const buffer = incomingBuffers.current.get(fileId);
@@ -249,7 +252,6 @@ export function useWebRTC() {
 
             const progress = Math.min(100, Math.round((buffer.receivedBytes / buffer.meta.size) * 100));
 
-            // Calculate instantaneous & smoothed speed
             const now = performance.now();
             const tracker = speedTrackers.current.get(fileId);
             let speed = 0;
@@ -281,13 +283,19 @@ export function useWebRTC() {
   );
 
   // ---------------------------------------------------------------------------
-  // 4. File Chunking & Backpressure Transmission (Sender Side)
+  // 4. File Chunking & Transmission (Sender Side with Cancellation Check)
   // ---------------------------------------------------------------------------
   const sendFileToPeer = useCallback(
-    async (file: File, targetPeerId: string) => {
+    async (file: File, targetPeerId: string, existingFileId?: string) => {
       const pc = getOrCreatePeerConnection(targetPeerId);
-      const fileId = `file-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const fileId = existingFileId || `file-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const targetPeer = peers.find((p) => p.id === targetPeerId);
+
+      // Check if cancelled before starting
+      if (cancelledTransfers.current.has(fileId)) {
+        cancelledTransfers.current.delete(fileId);
+        return;
+      }
 
       // Create or reuse data channel
       let channel = dataChannels.current.get(targetPeerId);
@@ -295,7 +303,6 @@ export function useWebRTC() {
         channel = pc.createDataChannel('antigravity-transfer', { ordered: true });
         setupDataChannelEvents(targetPeerId, channel);
 
-        // Create WebRTC Offer
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
@@ -304,7 +311,6 @@ export function useWebRTC() {
           offer,
         });
 
-        // Await channel to open
         await new Promise<void>((resolve, reject) => {
           const timeout = setTimeout(() => reject(new Error('Connection timed out')), 15000);
           channel!.onopen = () => {
@@ -318,7 +324,11 @@ export function useWebRTC() {
         });
       }
 
-      // Prepare metadata
+      if (cancelledTransfers.current.has(fileId)) {
+        cancelledTransfers.current.delete(fileId);
+        return;
+      }
+
       const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
       const fileMeta: FileMetadata = {
         fileId,
@@ -329,7 +339,6 @@ export function useWebRTC() {
         chunkSize: CHUNK_SIZE,
       };
 
-      // Set initial transfer state
       updateTransfer(fileId, {
         id: fileId,
         fileName: file.name,
@@ -346,21 +355,33 @@ export function useWebRTC() {
         startedAt: Date.now(),
       });
 
-      // Send Header packet
+      // Send Header
       const headerPayload: WebRTCMessageHeader = { type: 'header', fileMeta };
       channel.send(JSON.stringify(headerPayload));
 
-      // Set flow control threshold
       channel.bufferedAmountLowThreshold = BUFFER_LOW_THRESHOLD;
 
-      // Send Chunks with backpressure flow control
       let offset = 0;
       let sentBytes = 0;
       let lastSpeedCalcTime = performance.now();
       let lastSentBytes = 0;
 
       while (offset < file.size) {
-        // Backpressure check: If buffer exceeds 1MB, wait for onbufferedamountlow event
+        // Immediate cancellation check
+        if (cancelledTransfers.current.has(fileId)) {
+          try {
+            channel.send(JSON.stringify({ type: 'cancel', fileId }));
+          } catch (e) {}
+          updateTransfer(fileId, {
+            status: 'cancelled',
+            error: 'Cancelled by user',
+            speedBytesPerSec: 0,
+          });
+          cancelledTransfers.current.delete(fileId);
+          return;
+        }
+
+        // Backpressure flow control
         if (channel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
           await new Promise<void>((resolve) => {
             const onLow = () => {
@@ -371,11 +392,22 @@ export function useWebRTC() {
           });
         }
 
-        // Slice slice and read chunk
+        if (cancelledTransfers.current.has(fileId)) {
+          try {
+            channel.send(JSON.stringify({ type: 'cancel', fileId }));
+          } catch (e) {}
+          updateTransfer(fileId, {
+            status: 'cancelled',
+            error: 'Cancelled by user',
+            speedBytesPerSec: 0,
+          });
+          cancelledTransfers.current.delete(fileId);
+          return;
+        }
+
         const slice = file.slice(offset, offset + CHUNK_SIZE);
         const arrayBuffer = await slice.arrayBuffer();
 
-        // Transmit binary chunk
         channel.send(arrayBuffer);
 
         offset += slice.size;
@@ -383,7 +415,6 @@ export function useWebRTC() {
 
         const progress = Math.min(100, Math.round((sentBytes / file.size) * 100));
 
-        // Speed metric update
         const now = performance.now();
         const timeDiff = (now - lastSpeedCalcTime) / 1000;
         let speed = 0;
@@ -405,7 +436,15 @@ export function useWebRTC() {
         });
       }
 
-      // Send completion packet
+      if (cancelledTransfers.current.has(fileId)) {
+        try {
+          channel.send(JSON.stringify({ type: 'cancel', fileId }));
+        } catch (e) {}
+        cancelledTransfers.current.delete(fileId);
+        return;
+      }
+
+      // Send complete
       const completePayload: WebRTCMessageComplete = { type: 'complete', fileId };
       channel.send(JSON.stringify(completePayload));
 
@@ -422,69 +461,119 @@ export function useWebRTC() {
   );
 
   // ---------------------------------------------------------------------------
-  // 5. User-Initiated Transfer Request (with accept/decline dialog)
+  // 5. User-Initiated Transfer with 3-Second Undo / Cancel Grace Window
   // ---------------------------------------------------------------------------
   const initiateTransfer = useCallback(
     (file: File, targetPeerId: string) => {
-      if (autoAccept) {
-        // Direct stream without manual prompt
-        sendFileToPeer(file, targetPeerId);
-      } else {
-        // Send pre-transfer notification to receiver
-        const fileMeta: FileMetadata = {
-          fileId: `file-${Date.now()}`,
-          name: file.name,
-          size: file.size,
-          type: file.type,
-          totalChunks: Math.ceil(file.size / CHUNK_SIZE),
-          chunkSize: CHUNK_SIZE,
-        };
+      const targetPeer = peers.find((p) => p.id === targetPeerId);
+      const fileId = `file-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
-        socketRef.current?.emit('transfer-request', {
-          to: targetPeerId,
-          fileMeta,
-        });
-
-        const targetPeer = peers.find((p) => p.id === targetPeerId);
-        updateTransfer(fileMeta.fileId, {
-          id: fileMeta.fileId,
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type,
-          peerId: targetPeerId,
-          peerName: targetPeer?.name || 'Remote Peer',
-          direction: 'sending',
-          status: 'pending',
-          progress: 0,
-          bytesTransferred: 0,
-          speedBytesPerSec: 0,
-          timeRemainingSec: null,
-          startedAt: Date.now(),
-        });
-
-        // Store file reference for when receiver accepts
-        const onResponse = (data: { from: string; accepted: boolean; fileId: string }) => {
-          if (data.fileId === fileMeta.fileId) {
-            socketRef.current?.off('transfer-response', onResponse);
-            if (data.accepted) {
-              sendFileToPeer(file, targetPeerId);
-            } else {
-              updateTransfer(fileMeta.fileId, {
-                status: 'cancelled',
-                error: 'Transfer declined by receiver',
-              });
-            }
-          }
-        };
-
-        socketRef.current?.on('transfer-response', onResponse);
+      // Clear any existing pending timer
+      if (pendingTimerRef.current) {
+        clearInterval(pendingTimerRef.current);
       }
+
+      // Register transfer in state
+      updateTransfer(fileId, {
+        id: fileId,
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type,
+        peerId: targetPeerId,
+        peerName: targetPeer?.name || 'Remote Peer',
+        direction: 'sending',
+        status: 'pending',
+        progress: 0,
+        bytesTransferred: 0,
+        speedBytesPerSec: 0,
+        timeRemainingSec: null,
+        startedAt: Date.now(),
+      });
+
+      // 3-second grace countdown
+      let remaining = 3;
+      setPendingSend({
+        file,
+        targetPeerId,
+        targetPeerName: targetPeer?.name || 'Remote Peer',
+        fileId,
+        countdown: remaining,
+      });
+
+      pendingTimerRef.current = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          if (pendingTimerRef.current) {
+            clearInterval(pendingTimerRef.current);
+            pendingTimerRef.current = null;
+          }
+          setPendingSend(null);
+          // Start actual send if user did not cancel
+          if (!cancelledTransfers.current.has(fileId)) {
+            sendFileToPeer(file, targetPeerId, fileId);
+          }
+        } else {
+          setPendingSend((prev) => (prev && prev.fileId === fileId ? { ...prev, countdown: remaining } : prev));
+        }
+      }, 1000);
     },
-    [autoAccept, peers, sendFileToPeer, updateTransfer]
+    [peers, sendFileToPeer, updateTransfer]
   );
 
   // ---------------------------------------------------------------------------
-  // 6. Incoming Transfer Dialog Actions
+  // 6. Cancel Transfer Action (Works before and during send)
+  // ---------------------------------------------------------------------------
+  const cancelTransfer = useCallback(
+    (fileId: string) => {
+      cancelledTransfers.current.add(fileId);
+
+      // Cancel pending grace countdown if active
+      if (pendingTimerRef.current) {
+        clearInterval(pendingTimerRef.current);
+        pendingTimerRef.current = null;
+      }
+      setPendingSend((prev) => (prev?.fileId === fileId ? null : prev));
+
+      // If active peer connection exists, notify peer
+      const currentTransfers = transfers;
+      const transfer = currentTransfers[fileId];
+      if (transfer && transfer.peerId) {
+        const channel = dataChannels.current.get(transfer.peerId);
+        if (channel && channel.readyState === 'open') {
+          try {
+            channel.send(JSON.stringify({ type: 'cancel', fileId }));
+          } catch (e) {}
+        }
+        socketRef.current?.emit('transfer-cancel', { to: transfer.peerId, fileId });
+      }
+
+      updateTransfer(fileId, {
+        status: 'cancelled',
+        error: 'Cancelled by user',
+        speedBytesPerSec: 0,
+      });
+    },
+    [transfers, updateTransfer]
+  );
+
+  // Send immediately (skip 3s grace countdown)
+  const confirmSendNow = useCallback(
+    (fileId: string) => {
+      if (pendingSend && pendingSend.fileId === fileId) {
+        if (pendingTimerRef.current) {
+          clearInterval(pendingTimerRef.current);
+          pendingTimerRef.current = null;
+        }
+        const { file, targetPeerId } = pendingSend;
+        setPendingSend(null);
+        sendFileToPeer(file, targetPeerId, fileId);
+      }
+    },
+    [pendingSend, sendFileToPeer]
+  );
+
+  // ---------------------------------------------------------------------------
+  // 7. Incoming Dialog Actions
   // ---------------------------------------------------------------------------
   const acceptIncomingTransfer = useCallback(() => {
     if (incomingRequest && socketRef.current) {
@@ -509,7 +598,7 @@ export function useWebRTC() {
   }, [incomingRequest]);
 
   // ---------------------------------------------------------------------------
-  // 7. Update Device Nickname / Color
+  // 8. Update Device Nickname
   // ---------------------------------------------------------------------------
   const updateDeviceName = useCallback((newName: string) => {
     setMyProfile((prev) => {
@@ -520,7 +609,7 @@ export function useWebRTC() {
   }, []);
 
   // ---------------------------------------------------------------------------
-  // 8. Socket.io Connection & Signaling Initialization
+  // 9. Socket.io Connection & Signaling Initialization
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const detected = detectDevice();
@@ -534,14 +623,12 @@ export function useWebRTC() {
     };
     setMyProfile(initialProfile);
 
-    // Connect to Socket.io signaling server (supports custom URL when hosted on Vercel)
     const signalingUrl = process.env.NEXT_PUBLIC_SIGNALING_URL || undefined;
     const socket = io(signalingUrl, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 10,
       reconnectionDelay: 1000,
     });
-
     socketRef.current = socket;
 
     socket.on('connect', () => {
@@ -550,7 +637,6 @@ export function useWebRTC() {
       socket.emit('join', updatedProfile);
     });
 
-    // Roster of other peers on LAN
     socket.on('peers-list', (peerList: Peer[]) => {
       setPeers(peerList);
     });
@@ -571,19 +657,16 @@ export function useWebRTC() {
       cleanupPeerConnection(id);
     });
 
-    // Signaling: Handle incoming WebRTC Offer
     socket.on('signal-offer', async ({ from, offer }) => {
       const pc = getOrCreatePeerConnection(from);
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-      // Flush any queued ICE candidates for this peer
       const queuedCandidates = pendingIceCandidates.current.get(from) || [];
       for (const candidate of queuedCandidates) {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
       }
       pendingIceCandidates.current.delete(from);
 
-      // Create and send Answer
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
@@ -593,13 +676,11 @@ export function useWebRTC() {
       });
     });
 
-    // Signaling: Handle incoming WebRTC Answer
     socket.on('signal-answer', async ({ from, answer }) => {
       const pc = peerConnections.current.get(from);
       if (pc) {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
 
-        // Flush any queued ICE candidates
         const queuedCandidates = pendingIceCandidates.current.get(from) || [];
         for (const candidate of queuedCandidates) {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
@@ -608,31 +689,25 @@ export function useWebRTC() {
       }
     });
 
-    // Signaling: Handle incoming ICE Candidate
     socket.on('signal-ice-candidate', async ({ from, candidate }) => {
       const pc = peerConnections.current.get(from);
       if (pc && pc.remoteDescription && pc.remoteDescription.type) {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
       } else {
-        // Queue until remote description is set
         const existing = pendingIceCandidates.current.get(from) || [];
         existing.push(candidate);
         pendingIceCandidates.current.set(from, existing);
       }
     });
 
-    // Handle incoming transfer request prompt
-    socket.on('transfer-request', (data: IncomingTransferRequest) => {
-      if (autoAccept) {
-        // Automatically accept
-        socket.emit('transfer-response', {
-          to: data.from,
-          accepted: true,
-          fileId: data.fileMeta.fileId,
-        });
-      } else {
-        setIncomingRequest(data);
-      }
+    socket.on('transfer-cancel', ({ fileId }: { fileId: string }) => {
+      incomingBuffers.current.delete(fileId);
+      speedTrackers.current.delete(fileId);
+      updateTransfer(fileId, {
+        status: 'cancelled',
+        error: 'Transfer cancelled by peer',
+        speedBytesPerSec: 0,
+      });
     });
 
     return () => {
@@ -641,27 +716,35 @@ export function useWebRTC() {
       peerConnections.current.clear();
       dataChannels.current.clear();
     };
-  }, [autoAccept, cleanupPeerConnection, getOrCreatePeerConnection]);
+  }, [cleanupPeerConnection, getOrCreatePeerConnection, updateTransfer]);
 
-  // Active transfer calculation (first one in transferring status)
+  // Derived states
   const activeTransfer = Object.values(transfers).find(
-    (t) => t.status === 'transferring' || t.status === 'pending'
+    (t) => t.status === 'transferring'
   ) || null;
 
   const recentCompletedTransfer = Object.values(transfers).find(
-    (t) => t.status === 'completed' && t.completedAt && Date.now() - t.completedAt < 8000
+    (t) => t.status === 'completed' && t.completedAt && Date.now() - t.completedAt < 6000
+  ) || null;
+
+  const recentCancelledTransfer = Object.values(transfers).find(
+    (t) => t.status === 'cancelled' && Date.now() - t.startedAt < 4000
   ) || null;
 
   return {
     myProfile,
     peers,
     transfers,
+    pendingSend,
     activeTransfer,
     recentCompletedTransfer,
+    recentCancelledTransfer,
     incomingRequest,
     autoAccept,
     setAutoAccept,
     initiateTransfer,
+    cancelTransfer,
+    confirmSendNow,
     acceptIncomingTransfer,
     declineIncomingTransfer,
     updateDeviceName,

@@ -44,6 +44,14 @@ export interface FileTransfer {
   completedAt?: number;
 }
 
+export interface PendingSend {
+  file: File;
+  targetPeerId: string;
+  targetPeerName: string;
+  fileId: string;
+  countdown: number;
+}
+
 export interface IncomingTransferRequest {
   from: string;
   senderPeer: Peer;
