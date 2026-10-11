@@ -1,14 +1,17 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { useWebRTC } from '../hooks/useWebRTC';
 import { DynamicIsland } from '../components/DynamicIsland';
 import { RadarScreen } from '../components/RadarScreen';
 import { DropZoneOverlay } from '../components/DropZoneOverlay';
 import { IncomingTransferModal } from '../components/IncomingTransferModal';
 import { TransferHistoryDrawer } from '../components/TransferHistoryDrawer';
+import { RenameModal } from '../components/RenameModal';
 
 export default function Home() {
+  const [isRenameOpen, setIsRenameOpen] = useState(false);
+
   const {
     myProfile,
     peers,
@@ -55,7 +58,7 @@ export default function Home() {
         myProfile={myProfile}
         peers={peers}
         onSendFile={(file, peerId) => initiateTransfer(file, peerId)}
-        onEditName={updateDeviceName}
+        onOpenRenameModal={() => setIsRenameOpen(true)}
       />
 
       {/* 3. Full Window Drag & Drop Overlay */}
@@ -75,6 +78,14 @@ export default function Home() {
       <TransferHistoryDrawer
         transfers={transfers}
         onCancelTransfer={cancelTransfer}
+      />
+
+      {/* 6. Rename Device Modal */}
+      <RenameModal
+        isOpen={isRenameOpen}
+        currentName={myProfile.name}
+        onClose={() => setIsRenameOpen(false)}
+        onSave={updateDeviceName}
       />
     </main>
   );

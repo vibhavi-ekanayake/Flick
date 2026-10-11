@@ -601,12 +601,18 @@ export function useWebRTC() {
   // 8. Update Device Nickname
   // ---------------------------------------------------------------------------
   const updateDeviceName = useCallback((newName: string) => {
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('flick_device_name', newName);
+      } catch (e) {}
+    }
     setMyProfile((prev) => {
       const updated = { ...prev, name: newName };
       socketRef.current?.emit('update-profile', { name: newName });
       return updated;
     });
   }, []);
+
 
   // ---------------------------------------------------------------------------
   // 9. Socket.io Connection & Signaling Initialization

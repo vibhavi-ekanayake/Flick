@@ -9,8 +9,7 @@ import {
   Tablet, 
   Monitor, 
   UploadCloud,
-  CheckCircle2,
-  HardDrive
+  Pencil
 } from 'lucide-react';
 
 interface PeerNodeProps {
@@ -18,7 +17,7 @@ interface PeerNodeProps {
   isSelf?: boolean;
   position?: { x: number; y: number };
   onSendFile?: (file: File, peerId: string) => void;
-  onEditName?: (name: string) => void;
+  onOpenRenameModal?: () => void;
 }
 
 export const PeerNode: React.FC<PeerNodeProps> = ({
@@ -26,12 +25,10 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
   isSelf = false,
   position = { x: 0, y: 0 },
   onSendFile,
-  onEditName,
+  onOpenRenameModal,
 }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-  const [nameInput, setNameInput] = useState(peer.name);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Device type icon selector
@@ -74,10 +71,10 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
     }
   };
 
-  // Click-to-browse trigger
+  // Click trigger
   const handleClick = () => {
     if (isSelf) {
-      setIsEditing(true);
+      onOpenRenameModal?.();
       return;
     }
     fileInputRef.current?.click();
@@ -87,17 +84,8 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
     if (e.target.files && e.target.files.length > 0 && onSendFile) {
       const file = e.target.files[0];
       onSendFile(file, peer.id);
-      // Reset input value
       e.target.value = '';
     }
-  };
-
-  const handleNameSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (nameInput.trim() && onEditName) {
-      onEditName(nameInput.trim());
-    }
-    setIsEditing(false);
   };
 
   return (
@@ -164,8 +152,8 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
         style={{
           borderColor: isDragOver ? '#32D74B' : isHovered ? peer.color : undefined,
         }}
+        title={isSelf ? 'Click to rename your device' : 'Click to send file'}
       >
-        {/* Drop indicator prompt */}
         {isDragOver ? (
           <UploadCloud className="w-8 h-8 text-cyan-300 animate-bounce" />
         ) : (
@@ -187,23 +175,26 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
       </button>
 
       {/* Device Info & Nickname */}
-      <div className="relative z-10 mt-3 flex flex-col items-center text-center max-w-[150px]">
-        {isEditing && isSelf ? (
-          <form onSubmit={handleNameSubmit} className="flex items-center">
-            <input
-              type="text"
-              value={nameInput}
-              onChange={(e) => setNameInput(e.target.value)}
-              onBlur={handleNameSubmit}
-              autoFocus
-              className="bg-black/60 border border-white/30 rounded-lg px-2 py-0.5 text-xs text-center text-white focus:outline-none focus:border-cyan-400"
-            />
-          </form>
+      <div className="relative z-10 mt-3 flex flex-col items-center text-center max-w-[170px]">
+        {isSelf ? (
+          /* User's own node: Obvious rename button with pencil */
+          <div className="flex flex-col items-center">
+            <button
+              onClick={() => onOpenRenameModal?.()}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/5 hover:bg-white/15 border border-white/10 hover:border-cyan-400/50 text-white/90 hover:text-white transition group cursor-pointer shadow-sm"
+              title="Click to rename device"
+            >
+              <span className="text-xs sm:text-sm font-semibold truncate max-w-[120px]">{peer.name}</span>
+              <Pencil className="w-3 h-3 text-cyan-400 group-hover:scale-110 transition shrink-0" />
+            </button>
+            <span className="text-[10px] text-white/35 mt-1">Click name to rename</span>
+          </div>
         ) : (
+          /* Other peer nodes */
           <div className="flex flex-col items-center group">
             <span
               className="text-xs sm:text-sm font-semibold text-white/90 truncate tracking-tight hover:text-white cursor-pointer"
-              title={isSelf ? 'Click to rename device' : 'Click to send file'}
+              title="Click to send file"
             >
               {peer.name}
             </span>

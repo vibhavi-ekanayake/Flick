@@ -47,6 +47,12 @@ export function detectDevice(): { deviceType: DeviceType; os: OS; defaultName: s
     os = 'linux';
   }
 
+  // Check saved custom name in localStorage
+  let savedName: string | null = null;
+  try {
+    savedName = localStorage.getItem('flick_device_name');
+  } catch (e) {}
+
   const randomAdj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
   const randomColor = COLORS[Math.floor(Math.random() * COLORS.length)];
 
@@ -58,7 +64,7 @@ export function detectDevice(): { deviceType: DeviceType; os: OS; defaultName: s
   else if (os === 'android') deviceLabel = 'Android';
   else if (os === 'linux') deviceLabel = 'Linux';
 
-  const defaultName = `${randomAdj} ${deviceLabel}`;
+  const defaultName = savedName || `${randomAdj} ${deviceLabel}`;
 
   return {
     deviceType,

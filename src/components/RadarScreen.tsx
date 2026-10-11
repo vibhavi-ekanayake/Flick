@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useMemo } from 'react';
-import { motion } from 'framer-motion';
 import { Peer } from '../types';
 import { PeerNode } from './PeerNode';
 
@@ -9,25 +8,23 @@ interface RadarScreenProps {
   myProfile: Peer;
   peers: Peer[];
   onSendFile: (file: File, peerId: string) => void;
-  onEditName: (name: string) => void;
+  onOpenRenameModal?: () => void;
 }
 
 export const RadarScreen: React.FC<RadarScreenProps> = ({
   myProfile,
   peers,
   onSendFile,
-  onEditName,
+  onOpenRenameModal,
 }) => {
   // Compute orbital positions for peers around the central radar
   const peerPositions = useMemo(() => {
     const count = peers.length;
     if (count === 0) return [];
 
-    // Radar orbital radius in pixels
     const radius = 220;
 
     return peers.map((peer, index) => {
-      // Offset start angle so peers distribute nicely
       const angle = (2 * Math.PI * index) / count - Math.PI / 2;
       const x = Math.round(Math.cos(angle) * radius);
       const y = Math.round(Math.sin(angle) * radius);
@@ -46,13 +43,9 @@ export const RadarScreen: React.FC<RadarScreenProps> = ({
 
       {/* 2. Concentric Radar Rings */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-        {/* Ring 1 (Inner) */}
         <div className="w-[200px] h-[200px] rounded-full radar-ring animate-pulse-slow opacity-60" />
-        {/* Ring 2 (Middle) */}
         <div className="absolute w-[440px] h-[440px] rounded-full radar-ring opacity-40" />
-        {/* Ring 3 (Outer) */}
         <div className="absolute w-[680px] h-[680px] rounded-full radar-ring opacity-25" />
-        {/* Ring 4 (Far Perimeter) */}
         <div className="absolute w-[920px] h-[920px] rounded-full radar-ring opacity-15" />
 
         {/* Radar Sweeping Scanner Line */}
@@ -67,7 +60,7 @@ export const RadarScreen: React.FC<RadarScreenProps> = ({
           peer={myProfile}
           isSelf={true}
           position={{ x: 0, y: 0 }}
-          onEditName={onEditName}
+          onOpenRenameModal={onOpenRenameModal}
         />
       </div>
 
@@ -94,4 +87,3 @@ export const RadarScreen: React.FC<RadarScreenProps> = ({
     </div>
   );
 };
-
