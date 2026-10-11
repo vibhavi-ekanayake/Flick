@@ -39,13 +39,7 @@ export default function Home() {
 
   return (
     <main className="relative w-full h-screen overflow-hidden bg-[#07080b]">
-      {/* 1. Flick Minimal Branding */}
-      <header className="fixed top-6 left-7 z-40 flex items-center gap-3 pointer-events-auto">
-        <div className="w-8 h-8 rounded-xl bg-white/10 backdrop-blur-md border border-white/15 flex items-center justify-center shadow-lg">
-          <div className="w-2.5 h-2.5 rounded-full bg-cyan-400 shadow-[0_0_10px_#32d74b]" />
-        </div>
-        <h1 className="text-lg font-bold tracking-tight text-white/95">Flick</h1>
-      </header>
+
 
 
       {/* 2. Top Morphing Dynamic Island (iOS 27 Pill) */}

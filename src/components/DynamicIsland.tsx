@@ -171,9 +171,7 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.9, opacity: 0, y: -10 }}
             transition={{ type: 'spring', stiffness: 420, damping: 30 }}
-            className="glass-island px-4 py-2 rounded-full flex items-center gap-3 cursor-pointer group hover:border-white/25 transition-all shadow-island-glow"
-            onClick={onToggleAutoAccept}
-            title={`Click to toggle Auto-Accept (Currently: ${autoAccept ? 'ON' : 'OFF'})`}
+            className="glass-island px-4 py-2 rounded-full flex items-center gap-3 transition-all shadow-island-glow"
           >
             {/* Pulsing Sonar Beacon */}
             <div className="relative flex items-center justify-center">
@@ -185,20 +183,9 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
               <Radio className="w-3.5 h-3.5 text-cyan-400" />
               <span>Flick</span>
               <span className="text-white/30">•</span>
-              <span className="text-white/50 group-hover:text-white/80 transition">
+              <span className="text-white/50">
                 {peerCount === 0 ? 'Radar Active' : `${peerCount} Device${peerCount > 1 ? 's' : ''} Nearby`}
               </span>
-            </div>
-
-            {/* Auto-Accept Mini Badge */}
-            <div
-              className={`text-[10px] px-2 py-0.5 rounded-full font-medium transition ${
-                autoAccept
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-white/10 text-white/40'
-              }`}
-            >
-              {autoAccept ? 'Auto-Accept' : 'Ask'}
             </div>
           </motion.div>
         )}
