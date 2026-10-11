@@ -55,7 +55,7 @@ export const RadarScreen: React.FC<RadarScreenProps> = ({
       </div>
 
       {/* 3. Center Node: The Current User */}
-      <div className="relative z-20">
+      <div className="relative z-40 pointer-events-auto">
         <PeerNode
           peer={myProfile}
           isSelf={true}
@@ -65,17 +65,19 @@ export const RadarScreen: React.FC<RadarScreenProps> = ({
       </div>
 
       {/* 4. Orbiting Discovered Peers */}
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-auto z-30">
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30">
         {peerPositions.map(({ peer, position }) => (
-          <PeerNode
-            key={peer.id}
-            peer={peer}
-            isSelf={false}
-            position={position}
-            onSendFile={onSendFile}
-          />
+          <div key={peer.id} className="pointer-events-auto">
+            <PeerNode
+              peer={peer}
+              isSelf={false}
+              position={position}
+              onSendFile={onSendFile}
+            />
+          </div>
         ))}
       </div>
+
 
       {/* 5. Minimal Radar Scanning Indicator */}
       {peers.length === 0 && (

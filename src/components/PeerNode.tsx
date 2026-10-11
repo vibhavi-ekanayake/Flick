@@ -72,7 +72,8 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
   };
 
   // Click trigger
-  const handleClick = () => {
+  const handleClick = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
     if (isSelf) {
       onOpenRenameModal?.();
       return;
@@ -90,7 +91,7 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
 
   return (
     <motion.div
-      className="relative flex flex-col items-center justify-center select-none"
+      className="relative flex flex-col items-center justify-center select-none pointer-events-auto"
       initial={{ scale: 0, opacity: 0 }}
       animate={{
         scale: isDragOver ? 1.25 : 1,
@@ -141,8 +142,9 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
 
       {/* The Central Orb Node */}
       <button
+        type="button"
         onClick={handleClick}
-        className={`relative z-10 w-20 h-20 sm:w-24 sm:h-24 rounded-full glass-node flex flex-col items-center justify-center cursor-pointer transition-all duration-300 ${
+        className={`relative z-20 w-20 h-20 sm:w-24 sm:h-24 rounded-full glass-node flex flex-col items-center justify-center cursor-pointer transition-all duration-300 pointer-events-auto ${
           isDragOver
             ? 'border-cyan-400 shadow-[0_0_40px_rgba(50,215,75,0.6)] scale-110'
             : isHovered
@@ -175,19 +177,23 @@ export const PeerNode: React.FC<PeerNodeProps> = ({
       </button>
 
       {/* Device Info & Nickname */}
-      <div className="relative z-10 mt-3 flex flex-col items-center text-center max-w-[170px]">
+      <div className="relative z-30 mt-3 flex flex-col items-center text-center max-w-[170px]">
         {isSelf ? (
           /* User's own node: Obvious rename button with pencil */
           <div className="flex flex-col items-center">
             <button
-              onClick={() => onOpenRenameModal?.()}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/5 hover:bg-white/15 border border-white/10 hover:border-cyan-400/50 text-white/90 hover:text-white transition group cursor-pointer shadow-sm"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenRenameModal?.();
+              }}
+              className="relative z-40 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 border border-white/20 hover:border-cyan-400 text-white transition group cursor-pointer shadow-md pointer-events-auto"
               title="Click to rename device"
             >
               <span className="text-xs sm:text-sm font-semibold truncate max-w-[120px]">{peer.name}</span>
-              <Pencil className="w-3 h-3 text-cyan-400 group-hover:scale-110 transition shrink-0" />
+              <Pencil className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition shrink-0" />
             </button>
-            <span className="text-[10px] text-white/35 mt-1">Click name to rename</span>
+            <span className="text-[10px] text-white/40 mt-1 pointer-events-none">Click to rename</span>
           </div>
         ) : (
           /* Other peer nodes */
